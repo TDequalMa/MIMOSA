@@ -8,6 +8,7 @@ import os
 import matplotlib.pyplot as plt
 
 from inference_sdk import InferenceHTTPClient
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 # ============================================================
@@ -135,7 +136,7 @@ st.video(video_bytes)
 
 
 # ============================================================
-# 7. 첫 프레임 표시
+# 7. 첫 프레임 표시 + P1 클릭 설정
 # ============================================================
 
 st.subheader("1단계 — P1 설정")
@@ -145,62 +146,29 @@ first_rgb = cv2.cvtColor(
     cv2.COLOR_BGR2RGB
 )
 
-st.image(
-    first_rgb,
-    caption="첫 번째 프레임",
-    use_container_width=True
-)
-
-
 st.write(
     """
     **P1은 분석 대상 잎의 운동을 측정하기 위한 기준점입니다.**
 
-    첫 번째 프레임에서 P1의 픽셀 좌표를 입력하세요.
-    좌표의 원점은 이미지의 왼쪽 위입니다.
+    아래 이미지를 **클릭**해서 P1 좌표를 설정하세요.
     """
 )
 
 
-# ============================================================
-# 8. P1 입력
-# ============================================================
+# 세션에 좌표 저장 (처음엔 이미지 중앙)
+if "p1_x" not in st.session_state:
+    st.session_state.p1_x = width // 2
 
-col1, col2 = st.columns(2)
-
-with col1:
-    p1_x = st.number_input(
-        "P1 X 좌표",
-        min_value=0,
-        max_value=width - 1,
-        value=width // 2,
-        step=1
-    )
-
-with col2:
-    p1_y = st.number_input(
-        "P1 Y 좌표",
-        min_value=0,
-        max_value=height - 1,
-        value=height // 2,
-        step=1
-    )
-
-BASE_POINT = (
-    int(p1_x),
-    int(p1_y)
-)
+if "p1_y" not in st.session_state:
+    st.session_state.p1_y = height // 2
 
 
-# ============================================================
-# 9. P1 확인 이미지
-# ============================================================
-
+# 클릭 가능한 이미지 (미리보기용으로 P1 표시 반영해서 그림)
 preview = first_frame.copy()
 
 cv2.circle(
     preview,
-    BASE_POINT,
+    (st.session_state.p1_x, st.session_state.p1_y),
     10,
     (0, 0, 255),
     -1
@@ -210,8 +178,8 @@ cv2.putText(
     preview,
     "P1",
     (
-        BASE_POINT[0] + 10,
-        BASE_POINT[1] - 10
+        st.session_state.p1_x + 10,
+        st.session_state.p1_y - 10
     ),
     cv2.FONT_HERSHEY_SIMPLEX,
     0.8,
@@ -224,10 +192,66 @@ preview_rgb = cv2.cvtColor(
     cv2.COLOR_BGR2RGB
 )
 
-st.image(
+click_coords = streamlit_image_coordinates(
     preview_rgb,
-    caption=f"P1 = ({p1_x}, {p1_y})",
-    use_container_width=True
+    key="p1_picker"
+)
+
+# 새로 클릭했으면 좌표 갱신
+if click_coords is not None:
+
+    clicked_x = int(click_coords["x"])
+    clicked_y = int(click_coords["y"])
+
+    clicked_x = max(0, min(width - 1, clicked_x))
+    clicked_y = max(0, min(height - 1, clicked_y))
+
+    if (clicked_x, clicked_y) != (st.session_state.p1_x, st.session_state.p1_y):
+        st.session_state.p1_x = clicked_x
+        st.session_state.p1_y = clicked_y
+        st.rerun()
+
+
+st.write(f"현재 P1 좌표: **({st.session_state.p1_x}, {st.session_state.p1_y})**")
+
+
+# 미세 조정용 숫자 입력 (선택 사항)
+with st.expander("🔧 좌표 직접 입력 / 미세 조정"):
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        manual_x = st.number_input(
+            "P1 X 좌표",
+            min_value=0,
+            max_value=width - 1,
+            value=st.session_state.p1_x,
+            step=1,
+            key="manual_p1_x"
+        )
+
+    with col2:
+        manual_y = st.number_input(
+            "P1 Y 좌표",
+            min_value=0,
+            max_value=height - 1,
+            value=st.session_state.p1_y,
+            step=1,
+            key="manual_p1_y"
+        )
+
+    if st.button("이 좌표로 설정"):
+        st.session_state.p1_x = int(manual_x)
+        st.session_state.p1_y = int(manual_y)
+        st.rerun()
+
+
+p1_x = st.session_state.p1_x
+p1_y = st.session_state.p1_y
+
+BASE_POINT = (
+    int(p1_x),
+    int(p1_y)
 )
 
 
