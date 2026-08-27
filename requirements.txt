@@ -3,3 +3,4 @@ numpy
 pandas
 matplotlib
 inference-sdk
+streamlit-image-coordinates
