@@ -1,4 +1,4 @@
-import streamlit as st
+ㅍimport streamlit as st
 import cv2
 import numpy as np
 import pandas as pd
@@ -232,6 +232,20 @@ st.image(
 
 
 # ============================================================
+# 9.5 디버그 모드 옵션 (신규 추가)
+# ============================================================
+
+st.subheader("디버그 옵션")
+
+debug_mode = st.checkbox(
+    "🔍 디버그 모드 (첫 프레임의 원본 API 응답을 화면에 표시)",
+    value=True,
+    help="Roboflow API가 실제로 어떤 데이터 구조를 돌려주는지 확인할 때 켜세요. "
+         "잎 끝점을 못 찾는 문제를 진단하는 데 도움이 됩니다."
+)
+
+
+# ============================================================
 # 10. Keypoint 결과에서 좌표 찾기
 # ============================================================
 
@@ -413,6 +427,10 @@ if analyze_button:
 
     status = st.empty()
 
+    # 디버그 모드용 표시 영역 (첫 프레임 결과만 여기에 찍힘)
+    debug_container = st.container()
+    debug_shown = False
+
     cap = cv2.VideoCapture(
         video_path
     )
@@ -450,6 +468,9 @@ if analyze_button:
     records = []
 
     frame_index = 0
+
+    api_error_count = 0
+    last_api_error = None
 
 
     while True:
@@ -501,6 +522,24 @@ if analyze_button:
                 model_id=MODEL_ID
             )
 
+            # 디버그 모드: 첫 프레임의 원본 응답을 화면에 출력
+            if debug_mode and not debug_shown:
+                with debug_container:
+                    st.markdown("### 🔍 디버그: 첫 프레임 API 원본 응답")
+                    st.json(result)
+                    predictions_dbg = result.get("predictions", []) if result else []
+                    if predictions_dbg:
+                        st.write(
+                            f"prediction 개수: {len(predictions_dbg)}, "
+                            f"첫 prediction의 keys: {list(predictions_dbg[0].keys())}"
+                        )
+                        kp_dbg = predictions_dbg[0].get("keypoints")
+                        st.write(f"keypoints 타입: {type(kp_dbg)}")
+                        st.write(f"keypoints 내용: {kp_dbg}")
+                    else:
+                        st.warning("predictions가 비어 있습니다. 모델이 이 프레임에서 아무것도 검출하지 못했습니다.")
+                debug_shown = True
+
             tip = extract_tip_from_result(
                 result
             )
@@ -508,6 +547,14 @@ if analyze_button:
         except Exception as e:
 
             tip = None
+            api_error_count += 1
+            last_api_error = str(e)
+
+            # 디버그 모드: 첫 에러의 상세 내용을 화면에 출력
+            if debug_mode and api_error_count == 1:
+                with debug_container:
+                    st.markdown("### 🔍 디버그: API 호출 에러")
+                    st.error(f"에러 내용: {e}")
 
         finally:
 
@@ -680,7 +727,14 @@ if analyze_button:
 
     status.text(
         f"{frame_index}개 프레임 분석 완료"
+        + (f" (API 에러 {api_error_count}회 발생)" if api_error_count > 0 else "")
     )
+
+    if api_error_count > 0:
+        st.warning(
+            f"⚠️ 총 {frame_index}개 프레임 중 {api_error_count}개 프레임에서 API 호출이 실패했습니다. "
+            f"마지막 에러: {last_api_error}"
+        )
 
 
     # ========================================================
@@ -718,7 +772,9 @@ if analyze_button:
     if df["angle_deg"].isna().all():
 
         st.error(
-            "AI가 잎 끝점을 한 번도 검출하지 못했습니다."
+            "AI가 잎 끝점을 한 번도 검출하지 못했습니다. "
+            "위쪽의 '디버그 모드' 결과를 확인해서 API가 predictions를 비어있게 주는지, "
+            "아니면 keypoints 구조가 코드가 가정한 것과 다른지 확인해보세요."
         )
 
         st.stop()
