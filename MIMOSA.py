@@ -1,9 +1,3 @@
-streamlit
-opencv-python-headless
-numpy
-pandas
-matplotlib
-inference_sdk
 import streamlit as st
 import cv2
 import numpy as np
