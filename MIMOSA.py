@@ -43,7 +43,7 @@ if "ROBOFLOW_API_KEY" not in st.secrets:
     st.stop()
 
 CLIENT = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
+    api_url="https://detect.roboflow.com",
     api_key=st.secrets["ROBOFLOW_API_KEY"]
 )
 
