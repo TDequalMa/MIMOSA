@@ -141,11 +141,6 @@ st.video(video_bytes)
 
 st.subheader("1단계 — P1 설정")
 
-first_rgb = cv2.cvtColor(
-    first_frame,
-    cv2.COLOR_BGR2RGB
-)
-
 st.write(
     """
     **P1은 분석 대상 잎의 운동을 측정하기 위한 기준점입니다.**
@@ -164,10 +159,10 @@ if "p1_y" not in st.session_state:
 
 
 # 클릭 가능한 이미지 (미리보기용으로 P1 표시 반영해서 그림)
-preview = first_frame.copy()
+p1_preview = first_frame.copy()
 
 cv2.circle(
-    preview,
+    p1_preview,
     (st.session_state.p1_x, st.session_state.p1_y),
     10,
     (0, 0, 255),
@@ -175,7 +170,7 @@ cv2.circle(
 )
 
 cv2.putText(
-    preview,
+    p1_preview,
     "P1",
     (
         st.session_state.p1_x + 10,
@@ -187,21 +182,21 @@ cv2.putText(
     2
 )
 
-preview_rgb = cv2.cvtColor(
-    preview,
+p1_preview_rgb = cv2.cvtColor(
+    p1_preview,
     cv2.COLOR_BGR2RGB
 )
 
-click_coords = streamlit_image_coordinates(
-    preview_rgb,
+p1_click_coords = streamlit_image_coordinates(
+    p1_preview_rgb,
     key="p1_picker"
 )
 
 # 새로 클릭했으면 좌표 갱신
-if click_coords is not None:
+if p1_click_coords is not None:
 
-    clicked_x = int(click_coords["x"])
-    clicked_y = int(click_coords["y"])
+    clicked_x = int(p1_click_coords["x"])
+    clicked_y = int(p1_click_coords["y"])
 
     clicked_x = max(0, min(width - 1, clicked_x))
     clicked_y = max(0, min(height - 1, clicked_y))
@@ -216,7 +211,7 @@ st.write(f"현재 P1 좌표: **({st.session_state.p1_x}, {st.session_state.p1_y}
 
 
 # 미세 조정용 숫자 입력 (선택 사항)
-with st.expander("🔧 좌표 직접 입력 / 미세 조정"):
+with st.expander("🔧 P1 좌표 직접 입력 / 미세 조정"):
 
     col1, col2 = st.columns(2)
 
@@ -240,7 +235,7 @@ with st.expander("🔧 좌표 직접 입력 / 미세 조정"):
             key="manual_p1_y"
         )
 
-    if st.button("이 좌표로 설정"):
+    if st.button("이 좌표로 P1 설정"):
         st.session_state.p1_x = int(manual_x)
         st.session_state.p1_y = int(manual_y)
         st.rerun()
@@ -256,43 +251,26 @@ BASE_POINT = (
 
 
 # ============================================================
-# 9.5 디버그 모드 옵션 (신규 추가)
+# 8. Keypoint 추출 / 최근접점 탐색 함수
 # ============================================================
 
-st.subheader("디버그 옵션")
-
-debug_mode = st.checkbox(
-    "🔍 디버그 모드 (첫 프레임의 원본 API 응답을 화면에 표시)",
-    value=True,
-    help="Roboflow API가 실제로 어떤 데이터 구조를 돌려주는지 확인할 때 켜세요. "
-         "잎 끝점을 못 찾는 문제를 진단하는 데 도움이 됩니다."
-)
-
-
-# ============================================================
-# 10. Keypoint 결과에서 좌표 찾기
-# ============================================================
-
-def extract_tip_from_result(result):
+def extract_all_points(result):
     """
-    Roboflow Keypoint Detection 결과에서
-    가장 적절한 keypoint 좌표를 추출한다.
-
-    주의:
-    leaf-keypoint-clear/7의 실제 keypoint 이름과
-    결과 구조를 확인하기 전까지는
-    첫 번째 유효 keypoint를 사용한다.
+    Roboflow 결과에서 감지된 '모든' keypoint를 리스트로 반환한다.
+    반환 형식: [(x, y, confidence), (x, y, confidence), ...]
     """
+
+    points = []
 
     if not result:
-        return None
+        return points
 
     predictions = result.get("predictions", [])
 
     if not predictions:
-        return None
+        return points
 
-    # 가장 높은 confidence의 prediction 선택
+    # 가장 높은 confidence의 prediction(=잎 하나)을 대상으로 함
     best_prediction = max(
         predictions,
         key=lambda x: x.get("confidence", 0)
@@ -301,18 +279,10 @@ def extract_tip_from_result(result):
     keypoints = best_prediction.get("keypoints")
 
     if keypoints is None:
-        return None
+        return points
 
-    # ----------------------------------------
-    # 형태 1:
-    # keypoints = [
-    #     {"x": ..., "y": ..., "confidence": ...}
-    # ]
-    # ----------------------------------------
-
+    # 형태 1: keypoints = [{"x":.., "y":.., "confidence":..}, ...]
     if isinstance(keypoints, list):
-
-        valid_points = []
 
         for kp in keypoints:
 
@@ -325,45 +295,14 @@ def extract_tip_from_result(result):
             if x is None or y is None:
                 continue
 
-            confidence = kp.get(
-                "confidence",
-                1.0
+            confidence = kp.get("confidence", 1.0)
+
+            points.append(
+                (float(x), float(y), float(confidence))
             )
 
-            valid_points.append(
-                (
-                    float(confidence),
-                    float(x),
-                    float(y)
-                )
-            )
-
-        if valid_points:
-
-            valid_points.sort(
-                reverse=True
-            )
-
-            _, x, y = valid_points[0]
-
-            return (
-                int(round(x)),
-                int(round(y))
-            )
-
-    # ----------------------------------------
-    # 형태 2:
-    # keypoints = {
-    #     "tip": {
-    #         "x": ...,
-    #         "y": ...
-    #     }
-    # }
-    # ----------------------------------------
-
-    if isinstance(keypoints, dict):
-
-        candidate_points = []
+    # 형태 2: keypoints = {"tip": {"x":.., "y":..}, "base": {...}, ...}
+    elif isinstance(keypoints, dict):
 
         for name, kp in keypoints.items():
 
@@ -376,73 +315,206 @@ def extract_tip_from_result(result):
             if x is None or y is None:
                 continue
 
-            confidence = kp.get(
-                "confidence",
-                1.0
+            confidence = kp.get("confidence", 1.0)
+
+            points.append(
+                (float(x), float(y), float(confidence))
             )
 
-            candidate_points.append(
-                (
-                    float(confidence),
-                    float(x),
-                    float(y)
-                )
-            )
+    return points
 
-        if candidate_points:
 
-            candidate_points.sort(
-                reverse=True
-            )
+def find_nearest_point(target_xy, points):
+    """
+    points: [(x, y, confidence), ...] 중에서
+    target_xy = (x, y) 와 가장 가까운 점을 찾아 (x, y, confidence)로 반환.
+    points가 비어있으면 None.
+    """
 
-            _, x, y = candidate_points[0]
+    if not points:
+        return None
 
-            return (
-                int(round(x)),
-                int(round(y))
-            )
+    tx, ty = target_xy
 
-    return None
+    best_point = None
+    best_dist = None
+
+    for (x, y, conf) in points:
+
+        d = math.hypot(x - tx, y - ty)
+
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best_point = (x, y, conf)
+
+    return best_point
 
 
 # ============================================================
-# 11. 각도 계산
+# 9. 2단계 — 추적할 점 선택
 # ============================================================
 
-def calculate_angle(
-    base_point,
-    tip_point
-):
+st.subheader("2단계 — 추적할 점 선택")
 
-    bx, by = base_point
-    tx, ty = tip_point
+st.write(
+    """
+    AI 모델이 첫 프레임에서 감지한 **모든 점**을 초록색으로 표시합니다.
+    이 중에서 **추적하고 싶은 점을 클릭**하세요 (클릭한 위치에서 가장 가까운 점이 선택됩니다).
+    선택된 점은 **주황색**으로 표시되고, 그 점과 P1 사이의 거리를 기준으로 분석이 시작됩니다.
+    """
+)
 
-    dx = tx - bx
+if "detected_points" not in st.session_state:
+    st.session_state.detected_points = None
 
-    # 영상 좌표의 y축은 아래 방향이므로
-    # 수학 좌표계와 맞추기 위해 반전
-    dy = by - ty
+if "selected_point" not in st.session_state:
+    st.session_state.selected_point = None
 
-    angle = math.degrees(
-        math.atan2(
-            dy,
-            dx
-        )
+
+detect_button = st.button("🔍 첫 프레임에서 점 감지하기")
+
+if detect_button:
+
+    temp_first = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+    temp_first_path = temp_first.name
+    temp_first.close()
+
+    cv2.imwrite(temp_first_path, first_frame)
+
+    try:
+        first_result = CLIENT.infer(temp_first_path, model_id=MODEL_ID)
+
+        st.session_state.detected_points = extract_all_points(first_result)
+
+        if st.session_state.detected_points:
+
+            # 기본값: P1에서 가장 먼 점을 자동 선택 (보통 잎 끝일 확률이 높음)
+            # 마음에 안 들면 아래 이미지에서 다시 클릭해서 바꿀 수 있음
+            farthest = max(
+                st.session_state.detected_points,
+                key=lambda p: math.hypot(p[0] - BASE_POINT[0], p[1] - BASE_POINT[1])
+            )
+            st.session_state.selected_point = (farthest[0], farthest[1])
+
+        else:
+            st.session_state.selected_point = None
+            st.warning("이 프레임에서 점을 하나도 감지하지 못했습니다. AI 모델이나 이미지를 확인해보세요.")
+
+    except Exception as e:
+        st.error(f"API 에러: {e}")
+
+    finally:
+        if os.path.exists(temp_first_path):
+            os.remove(temp_first_path)
+
+    st.rerun()
+
+
+if st.session_state.detected_points:
+
+    points_preview = first_frame.copy()
+
+    cv2.circle(points_preview, BASE_POINT, 10, (0, 0, 255), -1)
+    cv2.putText(
+        points_preview,
+        "P1",
+        (BASE_POINT[0] + 10, BASE_POINT[1] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 255),
+        2
     )
 
-    return angle
+    for (x, y, conf) in st.session_state.detected_points:
+
+        xi, yi = int(round(x)), int(round(y))
+
+        is_selected = (
+            st.session_state.selected_point is not None
+            and abs(xi - int(round(st.session_state.selected_point[0]))) <= 1
+            and abs(yi - int(round(st.session_state.selected_point[1]))) <= 1
+        )
+
+        if is_selected:
+            color = (0, 165, 255)  # 주황 (선택됨)
+            radius = 11
+        else:
+            color = (0, 255, 0)  # 초록 (미선택)
+            radius = 6
+
+        cv2.circle(points_preview, (xi, yi), radius, color, -1)
+
+    points_preview_rgb = cv2.cvtColor(points_preview, cv2.COLOR_BGR2RGB)
+
+    point_click = streamlit_image_coordinates(points_preview_rgb, key="point_picker")
+
+    if point_click is not None:
+
+        cx = int(point_click["x"])
+        cy = int(point_click["y"])
+
+        nearest = find_nearest_point((cx, cy), st.session_state.detected_points)
+
+        if nearest is not None:
+
+            new_selected = (nearest[0], nearest[1])
+
+            if (
+                st.session_state.selected_point is None
+                or abs(new_selected[0] - st.session_state.selected_point[0]) > 0.5
+                or abs(new_selected[1] - st.session_state.selected_point[1]) > 0.5
+            ):
+                st.session_state.selected_point = new_selected
+                st.rerun()
+
+    if st.session_state.selected_point is not None:
+        sx, sy = st.session_state.selected_point
+        dist0 = math.hypot(sx - BASE_POINT[0], sy - BASE_POINT[1])
+        st.success(f"✅ 선택된 점: ({sx:.0f}, {sy:.0f}) — P1과의 거리: **{dist0:.1f}px**")
+
+elif detect_button:
+    pass
+
+else:
+    st.info("먼저 위의 '🔍 첫 프레임에서 점 감지하기' 버튼을 눌러주세요.")
 
 
 # ============================================================
-# 12. 분석 시작
+# 10. 반응 감지 임계값 + 디버그 옵션
 # ============================================================
 
-st.subheader("2단계 — AI 영상 분석")
+st.subheader("옵션")
+
+default_threshold = max(3, round(width * 0.02))
+
+response_threshold_px = st.number_input(
+    "반응 감지 임계값 (px) — P1과 추적점 사이 거리가 초기값보다 이만큼 변하면 '반응 시작'으로 판단",
+    min_value=1,
+    value=default_threshold,
+    step=1
+)
+
+debug_mode = st.checkbox(
+    "🔍 디버그 모드 (첫 프레임의 원본 API 응답을 화면에 표시)",
+    value=True,
+    help="Roboflow API가 실제로 어떤 데이터 구조를 돌려주는지 확인할 때 켜세요."
+)
+
+
+# ============================================================
+# 11. 분석 시작
+# ============================================================
+
+st.subheader("3단계 — AI 영상 분석")
 
 analyze_button = st.button(
     "🌱 분석 시작",
-    type="primary"
+    type="primary",
+    disabled=(st.session_state.selected_point is None)
 )
+
+if st.session_state.selected_point is None:
+    st.warning("분석을 시작하려면 먼저 2단계에서 추적할 점을 선택하세요.")
 
 
 if analyze_button:
@@ -496,6 +568,9 @@ if analyze_button:
     api_error_count = 0
     last_api_error = None
 
+    # 프레임별로 "이전 프레임에서 선택된 점"을 갱신해가며 추적
+    tracked_point = st.session_state.selected_point
+
 
     while True:
 
@@ -509,16 +584,9 @@ if analyze_button:
 
 
         # ----------------------------------------------------
-        # 프레임 저장
+        # 임시 이미지 생성
         # ----------------------------------------------------
 
-        frame_rgb = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
-
-
-        # 임시 이미지 생성
         temp_image = tempfile.NamedTemporaryFile(
             delete=False,
             suffix=".jpg"
@@ -539,6 +607,8 @@ if analyze_button:
         # Roboflow 추론
         # ----------------------------------------------------
 
+        all_points = []
+
         try:
 
             result = CLIENT.infer(
@@ -546,35 +616,22 @@ if analyze_button:
                 model_id=MODEL_ID
             )
 
+            all_points = extract_all_points(result)
+
             # 디버그 모드: 첫 프레임의 원본 응답을 화면에 출력
             if debug_mode and not debug_shown:
                 with debug_container:
                     st.markdown("### 🔍 디버그: 첫 프레임 API 원본 응답")
                     st.json(result)
-                    predictions_dbg = result.get("predictions", []) if result else []
-                    if predictions_dbg:
-                        st.write(
-                            f"prediction 개수: {len(predictions_dbg)}, "
-                            f"첫 prediction의 keys: {list(predictions_dbg[0].keys())}"
-                        )
-                        kp_dbg = predictions_dbg[0].get("keypoints")
-                        st.write(f"keypoints 타입: {type(kp_dbg)}")
-                        st.write(f"keypoints 내용: {kp_dbg}")
-                    else:
-                        st.warning("predictions가 비어 있습니다. 모델이 이 프레임에서 아무것도 검출하지 못했습니다.")
+                    st.write(f"감지된 점 개수: {len(all_points)}")
+                    st.write(f"감지된 점 좌표: {all_points}")
                 debug_shown = True
-
-            tip = extract_tip_from_result(
-                result
-            )
 
         except Exception as e:
 
-            tip = None
             api_error_count += 1
             last_api_error = str(e)
 
-            # 디버그 모드: 첫 에러의 상세 내용을 화면에 출력
             if debug_mode and api_error_count == 1:
                 with debug_container:
                     st.markdown("### 🔍 디버그: API 호출 에러")
@@ -591,27 +648,46 @@ if analyze_button:
 
 
         # ----------------------------------------------------
+        # 최근접점 추적: 이전 프레임에서 선택했던 점과
+        # 가장 가까운 점을 이번 프레임의 추적점으로 삼는다
+        # ----------------------------------------------------
+
+        nearest = find_nearest_point(
+            (tracked_point[0], tracked_point[1]),
+            all_points
+        )
+
+
+        # ----------------------------------------------------
         # 결과 초기화
         # ----------------------------------------------------
 
         tip_x = np.nan
         tip_y = np.nan
-        angle = np.nan
-        confidence = np.nan
+        distance_px = np.nan
+        tip_confidence = np.nan
 
 
         # ----------------------------------------------------
-        # Tip 검출 성공
+        # 추적점 검출 성공
         # ----------------------------------------------------
 
-        if tip is not None:
+        if nearest is not None:
+
+            nx, ny, nconf = nearest
+
+            tip = (int(round(nx)), int(round(ny)))
 
             tip_x, tip_y = tip
+            tip_confidence = nconf
 
-            angle = calculate_angle(
-                BASE_POINT,
-                tip
+            distance_px = math.hypot(
+                tip_x - BASE_POINT[0],
+                tip_y - BASE_POINT[1]
             )
+
+            # 다음 프레임에서는 이번에 찾은 점을 기준으로 최근접점을 다시 탐색
+            tracked_point = (nx, ny)
 
 
             # AI 결과 표시
@@ -627,7 +703,7 @@ if analyze_button:
                 frame,
                 tip,
                 8,
-                (255, 0, 0),
+                (0, 165, 255),
                 -1
             )
 
@@ -642,10 +718,7 @@ if analyze_button:
             cv2.putText(
                 frame,
                 "P1",
-                (
-                    BASE_POINT[0] + 10,
-                    BASE_POINT[1]
-                ),
+                (BASE_POINT[0] + 10, BASE_POINT[1]),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 (0, 0, 255),
@@ -654,20 +727,17 @@ if analyze_button:
 
             cv2.putText(
                 frame,
-                "TIP",
-                (
-                    tip_x + 10,
-                    tip_y
-                ),
+                "TRACK",
+                (tip_x + 10, tip_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (255, 0, 0),
+                (0, 165, 255),
                 2
             )
 
 
         # ----------------------------------------------------
-        # 영상에 시간/각도 표시
+        # 영상에 시간/거리 표시
         # ----------------------------------------------------
 
         cv2.putText(
@@ -680,12 +750,11 @@ if analyze_button:
             2
         )
 
-
-        if not math.isnan(angle):
+        if not math.isnan(distance_px):
 
             cv2.putText(
                 frame,
-                f"Angle: {angle:.2f} deg",
+                f"Distance: {distance_px:.1f}px",
                 (20, 70),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -702,31 +771,14 @@ if analyze_button:
         # ----------------------------------------------------
 
         records.append({
-
-            "frame":
-                frame_index,
-
-            "time_s":
-                timestamp,
-
-            "P1_x":
-                BASE_POINT[0],
-
-            "P1_y":
-                BASE_POINT[1],
-
-            "tip_x":
-                tip_x,
-
-            "tip_y":
-                tip_y,
-
-            "angle_deg":
-                angle,
-
-            "confidence":
-                confidence
-
+            "frame": frame_index,
+            "time_s": timestamp,
+            "P1_x": BASE_POINT[0],
+            "P1_y": BASE_POINT[1],
+            "tip_x": tip_x,
+            "tip_y": tip_y,
+            "confidence": tip_confidence,
+            "distance_px": distance_px
         })
 
 
@@ -734,10 +786,7 @@ if analyze_button:
 
 
         progress_bar.progress(
-            min(
-                frame_index / frame_count,
-                1.0
-            )
+            min(frame_index / frame_count, 1.0)
         )
 
         status.text(
@@ -762,336 +811,159 @@ if analyze_button:
 
 
     # ========================================================
-    # 13. 데이터프레임
+    # 12. 데이터프레임
     # ========================================================
 
-    df = pd.DataFrame(
-        records
-    )
+    df = pd.DataFrame(records)
+
+    # 검출 실패 구간 보간
+    df["tip_x"] = df["tip_x"].interpolate(limit_direction="both")
+    df["tip_y"] = df["tip_y"].interpolate(limit_direction="both")
+    df["distance_px"] = df["distance_px"].interpolate(limit_direction="both")
 
 
-    # Tip 검출 실패 구간 보간
-    df["tip_x"] = (
-        df["tip_x"]
-        .interpolate(
-            limit_direction="both"
-        )
-    )
-
-    df["tip_y"] = (
-        df["tip_y"]
-        .interpolate(
-            limit_direction="both"
-        )
-    )
-
-    df["angle_deg"] = (
-        df["angle_deg"]
-        .interpolate(
-            limit_direction="both"
-        )
-    )
-
-
-    if df["angle_deg"].isna().all():
+    if df["distance_px"].isna().all():
 
         st.error(
-            "AI가 잎 끝점을 한 번도 검출하지 못했습니다. "
-            "위쪽의 '디버그 모드' 결과를 확인해서 API가 predictions를 비어있게 주는지, "
-            "아니면 keypoints 구조가 코드가 가정한 것과 다른지 확인해보세요."
+            "AI가 추적점을 한 번도 검출하지 못했습니다. "
+            "위쪽의 '디버그 모드' 결과를 확인해서 API가 점을 비어있게 주는지 확인해보세요."
         )
 
         st.stop()
 
 
     # ========================================================
-    # 14. 상대각
+    # 13. 초기 거리 대비 상대 변화
     # ========================================================
 
-    angle_rad = np.deg2rad(
-        df["angle_deg"]
-    )
+    initial_distance = float(df["distance_px"].iloc[0])
 
-    df["angle_unwrapped_deg"] = (
-        np.rad2deg(
-            np.unwrap(
-                angle_rad
-            )
-        )
-    )
-
-
-    initial_angle = float(
-        df[
-            "angle_unwrapped_deg"
-        ].iloc[0]
-    )
-
-
-    df["relative_angle_deg"] = (
-        df[
-            "angle_unwrapped_deg"
-        ]
-        - initial_angle
-    )
+    df["relative_distance_px"] = df["distance_px"] - initial_distance
 
 
     # ========================================================
-    # 15. 각속도
+    # 14. 거리 변화 속도 (px/s)
     # ========================================================
 
-    df["dt"] = (
-        df["time_s"].diff()
-    )
+    df["dt"] = df["time_s"].diff()
+    df["ddist"] = df["relative_distance_px"].diff()
 
-    df["dtheta"] = (
-        df["relative_angle_deg"]
-        .diff()
-    )
+    df["distance_velocity_px_s"] = df["ddist"] / df["dt"]
 
-    df[
-        "angular_velocity_deg_s"
-    ] = (
-        df["dtheta"]
-        / df["dt"]
-    )
+    # 이상값 제거 (프레임 간 튀는 값)
+    velocity_outlier_limit = max(50, float(df["distance_velocity_px_s"].abs().quantile(0.99)) * 5) \
+        if df["distance_velocity_px_s"].notna().any() else 1e9
 
-
-    # 이상값 제거
     df.loc[
-        df[
-            "angular_velocity_deg_s"
-        ].abs() > 1000,
-        "angular_velocity_deg_s"
+        df["distance_velocity_px_s"].abs() > velocity_outlier_limit,
+        "distance_velocity_px_s"
     ] = np.nan
 
-
-    df[
-        "angular_velocity_deg_s"
-    ] = (
-        df[
-            "angular_velocity_deg_s"
-        ]
-        .interpolate(
-            limit_direction="both"
-        )
-    )
+    df["distance_velocity_px_s"] = df["distance_velocity_px_s"].interpolate(limit_direction="both")
 
 
     # ========================================================
-    # 16. 반응 시작 시간
+    # 15. 반응 시작 시간
     # ========================================================
-
-    RESPONSE_THRESHOLD = 3.0
 
     response_candidates = df.loc[
-        df[
-            "relative_angle_deg"
-        ].abs()
-        >= RESPONSE_THRESHOLD,
+        df["relative_distance_px"].abs() >= response_threshold_px,
         "time_s"
     ]
 
-
     if len(response_candidates) > 0:
-
-        response_time = float(
-            response_candidates.iloc[0]
-        )
-
+        response_time = float(response_candidates.iloc[0])
     else:
-
         response_time = np.nan
 
 
     # ========================================================
-    # 17. 주요 결과
+    # 16. 주요 결과
     # ========================================================
 
-    max_angle_change = float(
-        df[
-            "relative_angle_deg"
-        ]
-        .abs()
-        .max()
-    )
+    max_distance_change = float(df["relative_distance_px"].abs().max())
 
+    max_distance_velocity = float(df["distance_velocity_px_s"].abs().max())
 
-    max_angular_velocity = float(
-        df[
-            "angular_velocity_deg_s"
-        ]
-        .abs()
-        .max()
-    )
+    max_index = int(df["relative_distance_px"].abs().idxmax())
 
-
-    max_index = int(
-        df[
-            "relative_angle_deg"
-        ]
-        .abs()
-        .idxmax()
-    )
-
-
-    max_change_time = float(
-        df.loc[
-            max_index,
-            "time_s"
-        ]
-    )
+    max_change_time = float(df.loc[max_index, "time_s"])
 
 
     # ========================================================
-    # 18. 결과 표시
+    # 17. 결과 표시
     # ========================================================
 
-    st.success(
-        "분석이 완료되었습니다."
-    )
+    st.success("분석이 완료되었습니다.")
 
-
-    st.subheader(
-        "3단계 — 분석 결과"
-    )
-
+    st.subheader("4단계 — 분석 결과")
 
     col1, col2, col3 = st.columns(3)
 
-
-    col1.metric(
-        "최대 각도 변화",
-        f"{max_angle_change:.2f}°"
-    )
-
-
-    col2.metric(
-        "최대 각속도",
-        f"{max_angular_velocity:.2f}°/s"
-    )
-
+    col1.metric("최대 거리 변화", f"{max_distance_change:.1f}px")
+    col2.metric("최대 이동 속도", f"{max_distance_velocity:.1f}px/s")
 
     if math.isnan(response_time):
-
-        col3.metric(
-            "반응 시작",
-            "검출되지 않음"
-        )
-
+        col3.metric("반응 시작", "검출되지 않음")
     else:
+        col3.metric("반응 시작", f"{response_time:.2f}s")
 
-        col3.metric(
-            "반응 시작",
-            f"{response_time:.2f}s"
-        )
-
-
-    st.write(
-        f"최대 변화 시점: "
-        f"**{max_change_time:.2f}초**"
-    )
+    st.write(f"최대 변화 시점: **{max_change_time:.2f}초**")
 
 
     # ========================================================
-    # 19. 그래프
+    # 18. 그래프
     # ========================================================
 
-    st.subheader(
-        "움직임 그래프"
-    )
+    st.subheader("움직임 그래프")
 
-
-    fig, ax1 = plt.subplots(
-        figsize=(12, 6)
-    )
-
+    fig, ax1 = plt.subplots(figsize=(12, 6))
 
     ax1.plot(
         df["time_s"],
-        df["relative_angle_deg"],
-        label="Relative Angle"
+        df["relative_distance_px"],
+        label="Relative Distance (P1 - Tracked Point)"
     )
 
-
-    ax1.set_xlabel(
-        "Time (s)"
-    )
-
-    ax1.set_ylabel(
-        "Relative Angle (deg)"
-    )
-
-    ax1.grid(
-        True,
-        alpha=0.25
-    )
-
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Relative Distance (px)")
+    ax1.grid(True, alpha=0.25)
 
     ax2 = ax1.twinx()
 
-
     ax2.plot(
         df["time_s"],
-        df[
-            "angular_velocity_deg_s"
-        ],
+        df["distance_velocity_px_s"],
         alpha=0.65,
-        label="Angular Velocity"
+        label="Distance Change Rate"
     )
 
+    ax2.set_ylabel("Distance Change Rate (px/s)")
 
-    ax2.set_ylabel(
-        "Angular Velocity (deg/s)"
-    )
+    if not math.isnan(response_time):
+        ax1.axvline(response_time, linestyle="--", alpha=0.7)
 
-
-    if not math.isnan(
-        response_time
-    ):
-
-        ax1.axvline(
-            response_time,
-            linestyle="--",
-            alpha=0.7
-        )
-
-
-    fig.suptitle(
-        "Mimosa Motion Analysis"
-    )
-
+    fig.suptitle("Mimosa Motion Analysis (Point-Tracking Based)")
 
     fig.tight_layout()
-
 
     st.pyplot(fig)
 
 
     # ========================================================
-    # 20. 데이터 테이블
+    # 19. 데이터 테이블
     # ========================================================
 
-    st.subheader(
-        "프레임별 데이터"
-    )
+    st.subheader("프레임별 데이터")
 
-    st.dataframe(
-        df,
-        use_container_width=True
-    )
+    st.dataframe(df, use_container_width=True)
 
 
     # ========================================================
-    # 21. CSV 다운로드
+    # 20. CSV 다운로드
     # ========================================================
 
-    csv_data = df.to_csv(
-        index=False
-    ).encode(
-        "utf-8-sig"
-    )
-
+    csv_data = df.to_csv(index=False).encode("utf-8-sig")
 
     st.download_button(
         "📊 CSV 다운로드",
@@ -1102,26 +974,15 @@ if analyze_button:
 
 
     # ========================================================
-    # 22. 분석 영상
+    # 21. 분석 영상
     # ========================================================
 
-    st.subheader(
-        "AI 추적 결과 영상"
-    )
+    st.subheader("AI 추적 결과 영상")
 
-
-    with open(
-        output_video.name,
-        "rb"
-    ) as f:
-
+    with open(output_video.name, "rb") as f:
         output_video_bytes = f.read()
 
-
-    st.video(
-        output_video_bytes
-    )
-
+    st.video(output_video_bytes)
 
     st.download_button(
         "🎥 분석 영상 다운로드",
