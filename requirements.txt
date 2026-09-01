@@ -2,5 +2,7 @@ streamlit
 numpy
 pandas
 matplotlib
-inference-sdk
+google-genai
+Pillow
 streamlit-image-coordinates
+opencv-python
