@@ -48,10 +48,12 @@ GEMINI_CLIENT = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 GEMINI_MODEL = st.selectbox(
     "Gemini 모델",
-    options=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
+    options=["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"],
     index=0,
-    help="flash: 빠르고 저렴함 / pro, 3-pro-preview: 더 정밀하지만 느리고 비쌈. "
-         "정확한 모델명은 Google AI 문서에서 최신 상태를 확인하세요."
+    help="3.5-flash: 빠르고 저렴함(추천) / 3.1-pro-preview: 더 정밀하지만 느리고 비쌈 / "
+         "2.5-flash: 구버전, 안 될 수도 있음. "
+         "모델이 또 404가 나면 https://ai.google.dev/gemini-api/docs/models 에서 "
+         "최신 모델명을 확인하세요."
 )
 
 
