@@ -443,20 +443,20 @@ response_threshold_px = st.number_input(
 col1, col2 = st.columns(2)
 
 with col1:
-    use_gemini_fallback = st.checkbox(
-        "Optical Flow 놓치면 Gemini로 재탐지",
-        value=True,
-        help="추적이 여러 프레임 연속으로 실패하면 Gemini를 다시 호출해 점을 재탐지합니다. "
-             "정확도는 올라가지만 재탐지가 발생할 때마다 추가 API 호출/시간이 듭니다."
+    st.info(
+        "매 프레임마다 Gemini를 호출해서 점을 다시 찾고, "
+        "이전 프레임의 선택점과 가장 가까운 점을 자동으로 골라 추적합니다."
     )
 
 with col2:
-    lost_frame_threshold = st.number_input(
-        "재탐지 트리거 (연속 실패 프레임 수)",
+    frame_skip = st.number_input(
+        "프레임 스킵 (1 = 모든 프레임 분석)",
         min_value=1,
-        value=5,
+        value=1,
         step=1,
-        disabled=(not use_gemini_fallback)
+        help="1이면 모든 프레임을 Gemini로 분석합니다. "
+             "값을 늘리면 그만큼 프레임을 건너뛰어 호출 수/시간을 줄일 수 있지만, "
+             "시간 해상도가 낮아집니다."
     )
 
 
@@ -493,18 +493,10 @@ if analyze_button:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_video.name, fourcc, fps, (width, height))
 
-    lk_params = dict(
-        winSize=(21, 21),
-        maxLevel=3,
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
-    )
-
     records = []
     frame_index = 0
 
-    prev_gray = None
-    p0 = None
-    consecutive_lost = 0
+    tracked_point = st.session_state.selected_point  # (x, y), 매 프레임 갱신됨
     gemini_call_count = 0
 
     while True:
@@ -515,8 +507,6 @@ if analyze_button:
             break
 
         timestamp = frame_index / fps
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         tracking_method = None
 
@@ -531,64 +521,52 @@ if analyze_button:
             tracking_ok = True
             tracking_method = "initial"
 
-            p0 = np.array([[[tip_x, tip_y]]], dtype=np.float32)
+        # ------------------------------------------------
+        # 프레임 스킵 설정으로 건너뛰는 프레임: 이전 위치 그대로 기록
+        # (거리 변화 계산의 시간축은 유지하되, 이 프레임은 API를 호출하지 않음)
+        # ------------------------------------------------
+
+        elif frame_index % frame_skip != 0:
+
+            tip_x, tip_y = tracked_point
+            tracking_ok = True
+            tracking_method = "skipped"
 
         else:
 
             # --------------------------------------------
-            # Optical Flow로 이전 프레임 → 현재 프레임 추적
+            # 매 프레임 Gemini로 점 재탐지 →
+            # 이전 프레임 추적점과 가장 가까운 점을 선택
             # --------------------------------------------
 
-            p1, st_arr, err = cv2.calcOpticalFlowPyrLK(
-                prev_gray, gray, p0, None, **lk_params
+            all_points, raw_text = detect_points_with_gemini(
+                frame, hint_xy=tracked_point
             )
 
-            if st_arr is not None and st_arr[0][0] == 1:
-                tip_x, tip_y = float(p1[0][0][0]), float(p1[0][0][1])
+            gemini_call_count += 1
+
+            if all_points:
+
+                nearest = min(
+                    all_points,
+                    key=lambda p: math.hypot(
+                        p[0] - tracked_point[0], p[1] - tracked_point[1]
+                    )
+                )
+
+                tip_x, tip_y = float(nearest[0]), float(nearest[1])
                 tracking_ok = True
-                tracking_method = "optical_flow"
-                consecutive_lost = 0
-                p0 = p1
+                tracking_method = "gemini"
+
             else:
+
                 tip_x, tip_y = np.nan, np.nan
                 tracking_ok = False
                 tracking_method = "lost"
-                consecutive_lost += 1
-                # p0는 그대로 유지 (같은 위치에서 다음 프레임에 재시도)
+                # tracked_point는 그대로 유지 (다음 프레임에서 같은 위치 기준으로 재시도)
 
-            # --------------------------------------------
-            # 연속 실패 시 Gemini로 재탐지
-            # --------------------------------------------
-
-            if (
-                use_gemini_fallback
-                and not tracking_ok
-                and consecutive_lost >= lost_frame_threshold
-            ):
-
-                last_known = (float(p0[0][0][0]), float(p0[0][0][1]))
-
-                fallback_points, fallback_raw = detect_points_with_gemini(
-                    frame, hint_xy=last_known
-                )
-
-                gemini_call_count += 1
-
-                if fallback_points:
-
-                    nearest = min(
-                        fallback_points,
-                        key=lambda p: math.hypot(p[0] - last_known[0], p[1] - last_known[1])
-                    )
-
-                    tip_x, tip_y = float(nearest[0]), float(nearest[1])
-                    tracking_ok = True
-                    tracking_method = "gemini_fallback"
-                    consecutive_lost = 0
-
-                    p0 = np.array([[[tip_x, tip_y]]], dtype=np.float32)
-
-        prev_gray = gray
+        if tracking_ok:
+            tracked_point = (tip_x, tip_y)
 
 
         # ----------------------------------------------------
@@ -608,7 +586,7 @@ if analyze_button:
 
             cv2.circle(frame, BASE_POINT, 8, (0, 0, 255), -1)
 
-            marker_color = (0, 165, 255) if tracking_method != "gemini_fallback" else (255, 0, 255)
+            marker_color = (255, 0, 255) if tracking_method == "skipped" else (0, 165, 255)
 
             cv2.circle(frame, tip_int, 8, marker_color, -1)
             cv2.line(frame, BASE_POINT, tip_int, (255, 255, 0), 2)
@@ -618,7 +596,7 @@ if analyze_button:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2
             )
 
-            label = "GEMINI" if tracking_method == "gemini_fallback" else "TRACK"
+            label = "SKIP" if tracking_method == "skipped" else "TRACK"
 
             cv2.putText(
                 frame, label, (tip_int[0] + 10, tip_int[1]),
@@ -659,14 +637,14 @@ if analyze_button:
         progress_bar.progress(min(frame_index / frame_count, 1.0))
         status.text(
             f"{frame_index} / {frame_count} 프레임 분석 중... "
-            f"(Gemini 재탐지 {gemini_call_count}회)"
+            f"(Gemini 호출 {gemini_call_count}회)"
         )
 
     cap.release()
     writer.release()
 
     status.text(
-        f"{frame_index}개 프레임 분석 완료 (Gemini 재탐지 {gemini_call_count}회 발생)"
+        f"{frame_index}개 프레임 분석 완료 (Gemini 호출 {gemini_call_count}회 발생)"
     )
 
 
