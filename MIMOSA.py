@@ -156,81 +156,104 @@ BASE_POINT = (int(st.session_state.p1_x), int(st.session_state.p1_y))
 
 
 # ============================================================
-# 7. 2단계 — ROI(관심 영역) 설정
+# 7. 2단계 — ROI(관심 영역) 설정 — 원하는 모양으로 자유롭게 클릭
 # ============================================================
 
 st.subheader("2단계 — 관심 영역(ROI) 설정")
 
 st.write(
     """
-    잎이 움직이는 범위를 감싸는 사각형을 지정하세요.
-    **첫 클릭 = 왼쪽 위 모서리, 두 번째 클릭 = 오른쪽 아래 모서리**입니다.
+    잎이 움직이는 범위를 **원하는 모양대로 점을 찍어서** 감싸주세요.
+    점을 3개 이상 찍은 다음 **"다각형 완성"** 버튼을 누르면 영역이 확정됩니다.
     """
 )
 
-if "roi_stage" not in st.session_state:
-    st.session_state.roi_stage = 0  # 0: A 대기, 1: B 대기, 2: 완료
+if "roi_points" not in st.session_state:
+    st.session_state.roi_points = []
 
-if "roi_a" not in st.session_state:
-    st.session_state.roi_a = None
+if "roi_closed" not in st.session_state:
+    st.session_state.roi_closed = False
 
-if "roi_b" not in st.session_state:
-    st.session_state.roi_b = None
+col_undo, col_reset, col_close, col_status = st.columns([1, 1, 1, 3])
 
-col_reset, col_status = st.columns([1, 3])
+with col_undo:
+    if st.button("↩ 마지막 점 취소", disabled=st.session_state.roi_closed):
+        if st.session_state.roi_points:
+            st.session_state.roi_points.pop()
+            st.rerun()
 
 with col_reset:
-    if st.button("↺ ROI 다시 선택"):
-        st.session_state.roi_stage = 0
-        st.session_state.roi_a = None
-        st.session_state.roi_b = None
+    if st.button("↺ 전체 초기화"):
+        st.session_state.roi_points = []
+        st.session_state.roi_closed = False
+        st.rerun()
+
+with col_close:
+    if st.button(
+        "✅ 다각형 완성",
+        disabled=(len(st.session_state.roi_points) < 3 or st.session_state.roi_closed)
+    ):
+        st.session_state.roi_closed = True
         st.rerun()
 
 with col_status:
-    if st.session_state.roi_stage == 0:
-        st.info("왼쪽 위 모서리를 클릭하세요.")
-    elif st.session_state.roi_stage == 1:
-        st.info("오른쪽 아래 모서리를 클릭하세요.")
+    if st.session_state.roi_closed:
+        st.success(f"ROI 설정 완료 (점 {len(st.session_state.roi_points)}개)")
     else:
-        st.success("ROI 설정 완료. 다시 하려면 왼쪽 버튼을 누르세요.")
+        st.info(f"현재 {len(st.session_state.roi_points)}개 점 찍음 — 이미지를 클릭해서 점을 추가하세요.")
 
 roi_preview = p1_preview.copy()
 
-if st.session_state.roi_a is not None:
-    cv2.circle(roi_preview, st.session_state.roi_a, 6, (255, 0, 0), -1)
+pts = st.session_state.roi_points
 
-if st.session_state.roi_a is not None and st.session_state.roi_b is not None:
-    cv2.rectangle(roi_preview, st.session_state.roi_a, st.session_state.roi_b, (0, 255, 255), 2)
+for i, pt in enumerate(pts):
+    cv2.circle(roi_preview, pt, 5, (255, 0, 0), -1)
+    cv2.putText(roi_preview, str(i + 1), (pt[0] + 6, pt[1] - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+if len(pts) >= 2:
+    line_color = (0, 255, 255) if st.session_state.roi_closed else (0, 200, 255)
+    for i in range(len(pts) - 1):
+        cv2.line(roi_preview, pts[i], pts[i + 1], line_color, 2)
+    if st.session_state.roi_closed:
+        cv2.line(roi_preview, pts[-1], pts[0], line_color, 2)
 
 roi_preview_rgb = cv2.cvtColor(roi_preview, cv2.COLOR_BGR2RGB)
 
 roi_click = streamlit_image_coordinates(roi_preview_rgb, key="roi_picker")
 
-if roi_click is not None and st.session_state.roi_stage < 2:
+if roi_click is not None and not st.session_state.roi_closed:
     cx = max(0, min(width - 1, int(roi_click["x"])))
     cy = max(0, min(height - 1, int(roi_click["y"])))
 
-    if st.session_state.roi_stage == 0:
-        st.session_state.roi_a = (cx, cy)
-        st.session_state.roi_stage = 1
+    new_point = (cx, cy)
+
+    if not st.session_state.roi_points or st.session_state.roi_points[-1] != new_point:
+        st.session_state.roi_points.append(new_point)
         st.rerun()
-    elif st.session_state.roi_stage == 1:
-        st.session_state.roi_b = (cx, cy)
-        st.session_state.roi_stage = 2
-        st.rerun()
+
 
 ROI = None
+ROI_POLY_MASK = None
 
-if st.session_state.roi_a is not None and st.session_state.roi_b is not None:
-    ax, ay = st.session_state.roi_a
-    bx, by = st.session_state.roi_b
-    x1, x2 = sorted([ax, bx])
-    y1, y2 = sorted([ay, by])
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(width, x2), min(height, y2)
+if st.session_state.roi_closed and len(st.session_state.roi_points) >= 3:
+
+    pts_arr = np.array(st.session_state.roi_points, dtype=np.int32)
+
+    x1, y1 = pts_arr[:, 0].min(), pts_arr[:, 1].min()
+    x2, y2 = pts_arr[:, 0].max(), pts_arr[:, 1].max()
+
+    x1, y1 = max(0, int(x1)), max(0, int(y1))
+    x2, y2 = min(width, int(x2)), min(height, int(y2))
 
     if x2 - x1 >= 5 and y2 - y1 >= 5:
+
         ROI = (x1, y1, x2, y2)
+
+        # 다각형 마스크: ROI 크롭 좌표계 기준으로 생성
+        local_pts = pts_arr - np.array([x1, y1])
+        ROI_POLY_MASK = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+        cv2.fillPoly(ROI_POLY_MASK, [local_pts], 255)
 
 
 # ============================================================
@@ -293,17 +316,20 @@ if ROI is not None:
     preview_crop = first_frame[y1:y2, x1:x2]
     preview_mask = compute_green_mask(preview_crop, HSV_LOWER, HSV_UPPER)
 
+    if ROI_POLY_MASK is not None:
+        preview_mask = cv2.bitwise_and(preview_mask, ROI_POLY_MASK)
+
     col1, col2 = st.columns(2)
     with col1:
         st.image(
             cv2.cvtColor(preview_crop, cv2.COLOR_BGR2RGB),
-            caption="ROI 원본",
+            caption="ROI 원본 (사각형은 다각형을 감싸는 바운딩 박스)",
             use_container_width=True
         )
     with col2:
-        st.image(preview_mask, caption="인식된 초록색 마스크 (흰색 = 인식됨)", use_container_width=True)
+        st.image(preview_mask, caption="인식된 초록색 마스크 (다각형 안쪽만, 흰색 = 인식됨)", use_container_width=True)
 else:
-    st.warning("먼저 2단계에서 ROI를 지정하세요.")
+    st.warning("먼저 2단계에서 ROI를 지정하세요 (점 3개 이상 찍고 '다각형 완성').")
 
 
 # ============================================================
@@ -449,8 +475,11 @@ if analyze_button:
 
         mask = compute_green_mask(crop, HSV_LOWER, HSV_UPPER)
 
+        if ROI_POLY_MASK is not None:
+            mask = cv2.bitwise_and(mask, ROI_POLY_MASK)
+
         green_pixels = cv2.countNonZero(mask)
-        total_pixels = mask.shape[0] * mask.shape[1]
+        total_pixels = int(cv2.countNonZero(ROI_POLY_MASK)) if ROI_POLY_MASK is not None else (mask.shape[0] * mask.shape[1])
         green_ratio = green_pixels / total_pixels if total_pixels > 0 else np.nan
 
         tip_local = find_farthest_point_in_mask(mask, p1_local)
@@ -491,7 +520,13 @@ if analyze_button:
         # 시각화
         # ------------------------------------------------
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 1)
+        cv2.polylines(
+            frame,
+            [np.array(st.session_state.roi_points, dtype=np.int32)],
+            isClosed=True,
+            color=(0, 255, 255),
+            thickness=1
+        )
         cv2.circle(frame, BASE_POINT, 8, (0, 0, 255), -1)
         cv2.putText(frame, "P1", (BASE_POINT[0] + 10, BASE_POINT[1]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
