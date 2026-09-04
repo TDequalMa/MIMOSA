@@ -5,12 +5,9 @@ import pandas as pd
 import math
 import tempfile
 import os
-import json
 import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
 
-from PIL import Image
-from google import genai
-from google.genai import types
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 
@@ -27,110 +24,14 @@ st.set_page_config(
 st.title("🌱 Mimosa Motion Analyzer")
 
 st.write(
-    "Gemini로 첫 프레임에서 keypoint를 찾고, "
-    "이후 프레임은 Optical Flow로 추적하여 "
-    "미모사 잎 끝 움직임을 분석합니다."
+    "AI API 없이, 색상 기반 영역(ROI) 분석만으로 "
+    "미모사 잎의 움직임을 추적합니다. "
+    "(잎 끝 위치 추적 + 초록색 면적비 + 움직임량, 3중 신호로 분석)"
 )
 
 
 # ============================================================
-# 2. Gemini 연결
-# ============================================================
-
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error(
-        "GEMINI_API_KEY가 설정되지 않았습니다. "
-        "Streamlit Cloud → 앱 설정 → Secrets에 GEMINI_API_KEY를 추가하세요."
-    )
-    st.stop()
-
-GEMINI_CLIENT = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
-GEMINI_MODEL = st.selectbox(
-    "Gemini 모델",
-    options=["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"],
-    index=0,
-    help="3.5-flash: 빠르고 저렴함(추천) / 3.1-pro-preview: 더 정밀하지만 느리고 비쌈 / "
-         "2.5-flash: 구버전, 안 될 수도 있음. "
-         "모델이 또 404가 나면 https://ai.google.dev/gemini-api/docs/models 에서 "
-         "최신 모델명을 확인하세요."
-)
-
-
-# ============================================================
-# 3. Gemini 기반 keypoint 탐지 함수
-# ============================================================
-
-def detect_points_with_gemini(image_bgr, hint_xy=None):
-    """
-    Gemini에게 이미지 속 미모사 잎의 keypoint들을 짚어달라고 요청한다.
-    hint_xy = (x, y)가 주어지면, 그 근처의 점을 우선적으로
-    다시 찾아달라고 프롬프트에 포함한다 (재탐지용).
-
-    반환: [(x_px, y_px, label), ...], raw_response_text
-    """
-
-    h, w = image_bgr.shape[:2]
-
-    pil_img = Image.fromarray(
-        cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    )
-
-    if hint_xy is not None:
-        hx, hy = hint_xy
-        hint_text = (
-            f"참고로 방금 전까지는 이 점이 대략 픽셀 좌표 "
-            f"({hx:.0f}, {hy:.0f}) 근처에 있었습니다. "
-            "가능하면 그 근처에서 같은 지점을 다시 찾아주세요."
-        )
-    else:
-        hint_text = ""
-
-    prompt = f"""이 이미지는 미모사(mimosa) 식물의 잎을 촬영한 사진입니다.
-잎의 움직임을 추적하기 위한 keypoint를 최대 5개까지 찾아주세요
-(잎 끝(tip), 중간 마디, 잎자루 등 잎을 따라 있는 특징점).
-{hint_text}
-각 점에 대해 label과 이미지 내 정규화 좌표(0~1000 범위의 y, x)를
-아래 JSON 형식으로만 응답하세요. 다른 설명 없이 JSON만 반환하세요.
-
-{{"points": [{{"label": "tip", "point": [y, x]}}, {{"label": "mid", "point": [y, x]}}]}}"""
-
-    try:
-        response = GEMINI_CLIENT.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[pil_img, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-
-        raw_text = response.text
-
-    except Exception as e:
-        return [], f"API 에러: {e}"
-
-    try:
-        data = json.loads(raw_text)
-    except Exception:
-        return [], raw_text
-
-    points = []
-
-    for item in data.get("points", []):
-        try:
-            label = item.get("label", "point")
-            y_norm, x_norm = item["point"]
-            x_px = float(x_norm) / 1000.0 * w
-            y_px = float(y_norm) / 1000.0 * h
-            points.append((x_px, y_px, label))
-        except Exception:
-            continue
-
-    return points, raw_text
-
-
-# ============================================================
-# 4. 영상 업로드
+# 2. 영상 업로드
 # ============================================================
 
 uploaded_video = st.file_uploader(
@@ -144,16 +45,12 @@ if uploaded_video is None:
 
 
 # ============================================================
-# 5. 업로드 영상을 임시 파일로 저장
+# 3. 업로드 영상을 임시 파일로 저장
 # ============================================================
 
 video_bytes = uploaded_video.getvalue()
 
-input_video = tempfile.NamedTemporaryFile(
-    delete=False,
-    suffix=".mp4"
-)
-
+input_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
 input_video.write(video_bytes)
 input_video.close()
 
@@ -161,7 +58,7 @@ video_path = input_video.name
 
 
 # ============================================================
-# 6. 영상 정보 확인
+# 4. 영상 정보 확인
 # ============================================================
 
 cap = cv2.VideoCapture(video_path)
@@ -180,7 +77,6 @@ width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 ok, first_frame = cap.read()
-
 cap.release()
 
 if not ok:
@@ -191,13 +87,12 @@ duration = frame_count / fps
 
 
 # ============================================================
-# 7. 영상 정보 표시
+# 5. 영상 정보 표시
 # ============================================================
 
 st.subheader("영상 정보")
 
 col1, col2, col3, col4 = st.columns(4)
-
 col1.metric("해상도", f"{width} × {height}")
 col2.metric("FPS", f"{fps:.2f}")
 col3.metric("프레임 수", f"{frame_count}")
@@ -207,88 +102,51 @@ st.video(video_bytes)
 
 
 # ============================================================
-# 8. 첫 프레임 표시 + P1 클릭 설정
+# 6. 1단계 — P1 설정 (거리 측정 기준점)
 # ============================================================
 
-st.subheader("1단계 — P1 설정")
+st.subheader("1단계 — P1 설정 (거리 측정 기준점)")
 
-st.write(
-    """
-    **P1은 분석 대상 잎의 운동을 측정하기 위한 기준점입니다.**
-
-    아래 이미지를 **클릭**해서 P1 좌표를 설정하세요.
-    """
-)
+st.write("아래 이미지를 **클릭**해서 P1 좌표를 설정하세요. (보통 잎이 붙어있는 줄기 쪽)")
 
 if "p1_x" not in st.session_state:
     st.session_state.p1_x = width // 2
-
 if "p1_y" not in st.session_state:
     st.session_state.p1_y = height // 2
 
 p1_preview = first_frame.copy()
-
-cv2.circle(
-    p1_preview,
-    (st.session_state.p1_x, st.session_state.p1_y),
-    10,
-    (0, 0, 255),
-    -1
-)
-
+cv2.circle(p1_preview, (st.session_state.p1_x, st.session_state.p1_y), 10, (0, 0, 255), -1)
 cv2.putText(
-    p1_preview,
-    "P1",
+    p1_preview, "P1",
     (st.session_state.p1_x + 10, st.session_state.p1_y - 10),
-    cv2.FONT_HERSHEY_SIMPLEX,
-    0.8,
-    (0, 0, 255),
-    2
+    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2
 )
-
 p1_preview_rgb = cv2.cvtColor(p1_preview, cv2.COLOR_BGR2RGB)
 
-p1_click_coords = streamlit_image_coordinates(p1_preview_rgb, key="p1_picker")
+p1_click = streamlit_image_coordinates(p1_preview_rgb, key="p1_picker")
 
-if p1_click_coords is not None:
-
-    clicked_x = int(p1_click_coords["x"])
-    clicked_y = int(p1_click_coords["y"])
-
-    clicked_x = max(0, min(width - 1, clicked_x))
-    clicked_y = max(0, min(height - 1, clicked_y))
-
-    if (clicked_x, clicked_y) != (st.session_state.p1_x, st.session_state.p1_y):
-        st.session_state.p1_x = clicked_x
-        st.session_state.p1_y = clicked_y
+if p1_click is not None:
+    cx = max(0, min(width - 1, int(p1_click["x"])))
+    cy = max(0, min(height - 1, int(p1_click["y"])))
+    if (cx, cy) != (st.session_state.p1_x, st.session_state.p1_y):
+        st.session_state.p1_x = cx
+        st.session_state.p1_y = cy
         st.rerun()
 
 st.write(f"현재 P1 좌표: **({st.session_state.p1_x}, {st.session_state.p1_y})**")
 
 with st.expander("🔧 P1 좌표 직접 입력 / 미세 조정"):
-
     col1, col2 = st.columns(2)
-
     with col1:
         manual_x = st.number_input(
-            "P1 X 좌표",
-            min_value=0,
-            max_value=width - 1,
-            value=st.session_state.p1_x,
-            step=1,
-            key="manual_p1_x"
+            "P1 X", min_value=0, max_value=width - 1,
+            value=st.session_state.p1_x, step=1, key="manual_p1_x"
         )
-
     with col2:
         manual_y = st.number_input(
-            "P1 Y 좌표",
-            min_value=0,
-            max_value=height - 1,
-            value=st.session_state.p1_y,
-            step=1,
-            key="manual_p1_y"
+            "P1 Y", min_value=0, max_value=height - 1,
+            value=st.session_state.p1_y, step=1, key="manual_p1_y"
         )
-
     if st.button("이 좌표로 P1 설정"):
         st.session_state.p1_x = int(manual_x)
         st.session_state.p1_y = int(manual_y)
@@ -298,182 +156,255 @@ BASE_POINT = (int(st.session_state.p1_x), int(st.session_state.p1_y))
 
 
 # ============================================================
-# 9. 2단계 — 추적할 점 선택 (Gemini)
+# 7. 2단계 — ROI(관심 영역) 설정
 # ============================================================
 
-st.subheader("2단계 — 추적할 점 선택 (Gemini)")
+st.subheader("2단계 — 관심 영역(ROI) 설정")
 
 st.write(
     """
-    Gemini가 첫 프레임에서 찾은 **모든 점**을 초록색으로 표시합니다.
-    이 중에서 **추적하고 싶은 점을 클릭**하세요 (가장 가까운 점이 선택됩니다).
+    잎이 움직이는 범위를 감싸는 사각형을 지정하세요.
+    **첫 클릭 = 왼쪽 위 모서리, 두 번째 클릭 = 오른쪽 아래 모서리**입니다.
     """
 )
 
-if "detected_points" not in st.session_state:
-    st.session_state.detected_points = None
+if "roi_stage" not in st.session_state:
+    st.session_state.roi_stage = 0  # 0: A 대기, 1: B 대기, 2: 완료
 
-if "selected_point" not in st.session_state:
-    st.session_state.selected_point = None
+if "roi_a" not in st.session_state:
+    st.session_state.roi_a = None
 
-if "gemini_debug_text" not in st.session_state:
-    st.session_state.gemini_debug_text = None
+if "roi_b" not in st.session_state:
+    st.session_state.roi_b = None
 
-detect_button = st.button("🔍 Gemini로 첫 프레임에서 점 감지하기")
+col_reset, col_status = st.columns([1, 3])
 
-if detect_button:
+with col_reset:
+    if st.button("↺ ROI 다시 선택"):
+        st.session_state.roi_stage = 0
+        st.session_state.roi_a = None
+        st.session_state.roi_b = None
+        st.rerun()
 
-    with st.spinner("Gemini에게 물어보는 중..."):
-        points, raw_text = detect_points_with_gemini(first_frame)
-
-    st.session_state.detected_points = points
-    st.session_state.gemini_debug_text = raw_text
-
-    if points:
-        farthest = max(
-            points,
-            key=lambda p: math.hypot(p[0] - BASE_POINT[0], p[1] - BASE_POINT[1])
-        )
-        st.session_state.selected_point = (farthest[0], farthest[1])
+with col_status:
+    if st.session_state.roi_stage == 0:
+        st.info("왼쪽 위 모서리를 클릭하세요.")
+    elif st.session_state.roi_stage == 1:
+        st.info("오른쪽 아래 모서리를 클릭하세요.")
     else:
-        st.session_state.selected_point = None
-        st.warning("Gemini가 이 프레임에서 점을 하나도 찾지 못했습니다. 아래 디버그 응답을 확인해보세요.")
+        st.success("ROI 설정 완료. 다시 하려면 왼쪽 버튼을 누르세요.")
 
-    st.rerun()
+roi_preview = p1_preview.copy()
 
+if st.session_state.roi_a is not None:
+    cv2.circle(roi_preview, st.session_state.roi_a, 6, (255, 0, 0), -1)
 
-debug_mode = st.checkbox(
-    "🔍 디버그 모드 (Gemini 원본 응답 표시)",
-    value=True
-)
+if st.session_state.roi_a is not None and st.session_state.roi_b is not None:
+    cv2.rectangle(roi_preview, st.session_state.roi_a, st.session_state.roi_b, (0, 255, 255), 2)
 
-if debug_mode and st.session_state.gemini_debug_text is not None:
-    with st.expander("Gemini 원본 응답 (첫 프레임)"):
-        st.code(st.session_state.gemini_debug_text, language="json")
+roi_preview_rgb = cv2.cvtColor(roi_preview, cv2.COLOR_BGR2RGB)
 
+roi_click = streamlit_image_coordinates(roi_preview_rgb, key="roi_picker")
 
-if st.session_state.detected_points:
+if roi_click is not None and st.session_state.roi_stage < 2:
+    cx = max(0, min(width - 1, int(roi_click["x"])))
+    cy = max(0, min(height - 1, int(roi_click["y"])))
 
-    points_preview = first_frame.copy()
+    if st.session_state.roi_stage == 0:
+        st.session_state.roi_a = (cx, cy)
+        st.session_state.roi_stage = 1
+        st.rerun()
+    elif st.session_state.roi_stage == 1:
+        st.session_state.roi_b = (cx, cy)
+        st.session_state.roi_stage = 2
+        st.rerun()
 
-    cv2.circle(points_preview, BASE_POINT, 10, (0, 0, 255), -1)
-    cv2.putText(
-        points_preview,
-        "P1",
-        (BASE_POINT[0] + 10, BASE_POINT[1] - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 0, 255),
-        2
-    )
+ROI = None
 
-    for (x, y, label) in st.session_state.detected_points:
+if st.session_state.roi_a is not None and st.session_state.roi_b is not None:
+    ax, ay = st.session_state.roi_a
+    bx, by = st.session_state.roi_b
+    x1, x2 = sorted([ax, bx])
+    y1, y2 = sorted([ay, by])
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
 
-        xi, yi = int(round(x)), int(round(y))
-
-        is_selected = (
-            st.session_state.selected_point is not None
-            and abs(xi - int(round(st.session_state.selected_point[0]))) <= 1
-            and abs(yi - int(round(st.session_state.selected_point[1]))) <= 1
-        )
-
-        color = (0, 165, 255) if is_selected else (0, 255, 0)
-        radius = 11 if is_selected else 6
-
-        cv2.circle(points_preview, (xi, yi), radius, color, -1)
-        cv2.putText(
-            points_preview,
-            label,
-            (xi + 8, yi - 8),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            1
-        )
-
-    points_preview_rgb = cv2.cvtColor(points_preview, cv2.COLOR_BGR2RGB)
-
-    point_click = streamlit_image_coordinates(points_preview_rgb, key="point_picker")
-
-    if point_click is not None:
-
-        cx = int(point_click["x"])
-        cy = int(point_click["y"])
-
-        nearest = min(
-            st.session_state.detected_points,
-            key=lambda p: math.hypot(p[0] - cx, p[1] - cy)
-        )
-
-        new_selected = (nearest[0], nearest[1])
-
-        if (
-            st.session_state.selected_point is None
-            or abs(new_selected[0] - st.session_state.selected_point[0]) > 0.5
-            or abs(new_selected[1] - st.session_state.selected_point[1]) > 0.5
-        ):
-            st.session_state.selected_point = new_selected
-            st.rerun()
-
-    if st.session_state.selected_point is not None:
-        sx, sy = st.session_state.selected_point
-        dist0 = math.hypot(sx - BASE_POINT[0], sy - BASE_POINT[1])
-        st.success(f"✅ 선택된 점: ({sx:.0f}, {sy:.0f}) — P1과의 거리: **{dist0:.1f}px**")
-
-else:
-    st.info("먼저 위의 '🔍 Gemini로 첫 프레임에서 점 감지하기' 버튼을 눌러주세요.")
+    if x2 - x1 >= 5 and y2 - y1 >= 5:
+        ROI = (x1, y1, x2, y2)
 
 
 # ============================================================
-# 10. 옵션
+# 8. 3단계 — 색상(HSV) 임계값 보정
 # ============================================================
 
-st.subheader("옵션")
+st.subheader("3단계 — 초록색 인식 범위 보정")
 
-default_threshold = max(3, round(width * 0.02))
+st.write("슬라이더를 움직이며 아래 미리보기에서 잎이 하얗게(=인식됨) 나오도록 맞추세요.")
 
-response_threshold_px = st.number_input(
-    "반응 감지 임계값 (px)",
-    min_value=1,
-    value=default_threshold,
-    step=1,
-    help="P1과 추적점 사이 거리가 초기값보다 이만큼 변하면 '반응 시작'으로 판단합니다."
-)
-
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.info(
-        "매 프레임마다 Gemini를 호출해서 점을 다시 찾고, "
-        "이전 프레임의 선택점과 가장 가까운 점을 자동으로 골라 추적합니다."
-    )
-
+    h_range = st.slider("Hue (색상)", 0, 179, (30, 90))
 with col2:
-    frame_skip = st.number_input(
-        "프레임 스킵 (1 = 모든 프레임 분석)",
-        min_value=1,
-        value=1,
-        step=1,
-        help="1이면 모든 프레임을 Gemini로 분석합니다. "
-             "값을 늘리면 그만큼 프레임을 건너뛰어 호출 수/시간을 줄일 수 있지만, "
-             "시간 해상도가 낮아집니다."
+    s_range = st.slider("Saturation (채도)", 0, 255, (30, 255))
+with col3:
+    v_range = st.slider("Value (명도)", 0, 255, (30, 255))
+
+HSV_LOWER = (h_range[0], s_range[0], v_range[0])
+HSV_UPPER = (h_range[1], s_range[1], v_range[1])
+
+
+def compute_green_mask(frame_bgr, hsv_lower, hsv_upper):
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    lower = np.array(hsv_lower, dtype=np.uint8)
+    upper = np.array(hsv_upper, dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    return mask
+
+
+def find_farthest_point_in_mask(mask, ref_point_local):
+    """
+    mask(ROI 좌표계) 안의 가장 큰 초록 덩어리 윤곽선에서
+    ref_point_local(ROI 좌표계)로부터 가장 먼 점을 찾는다.
+    반환: (x, y) ROI 좌표계, 없으면 None
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+
+    if cv2.contourArea(largest) < 5:
+        return None
+
+    pts = largest.reshape(-1, 2)
+    rx, ry = ref_point_local
+
+    dists = np.hypot(pts[:, 0] - rx, pts[:, 1] - ry)
+    idx = int(np.argmax(dists))
+
+    return (float(pts[idx][0]), float(pts[idx][1]))
+
+
+if ROI is not None:
+    x1, y1, x2, y2 = ROI
+    preview_crop = first_frame[y1:y2, x1:x2]
+    preview_mask = compute_green_mask(preview_crop, HSV_LOWER, HSV_UPPER)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(
+            cv2.cvtColor(preview_crop, cv2.COLOR_BGR2RGB),
+            caption="ROI 원본",
+            use_container_width=True
+        )
+    with col2:
+        st.image(preview_mask, caption="인식된 초록색 마스크 (흰색 = 인식됨)", use_container_width=True)
+else:
+    st.warning("먼저 2단계에서 ROI를 지정하세요.")
+
+
+# ============================================================
+# 9. 4단계 — 자극 시점 / 반응 감지 옵션
+# ============================================================
+
+st.subheader("4단계 — 자극 시점 및 반응 감지 옵션")
+
+stimulus_input = st.text_input(
+    "자극을 준 시점(초), 쉼표로 여러 개 입력 가능 (예: 60, 180)",
+    value="",
+    help="비워두면 자동 반응 감지 없이 그래프만 보여줍니다."
+)
+
+change_threshold_pct = st.slider(
+    "반응 감지 민감도 (기준선 대비 변화율, %)",
+    min_value=1, max_value=50, value=5
+) / 100.0
+
+stimulus_times = []
+if stimulus_input.strip():
+    for tok in stimulus_input.split(","):
+        tok = tok.strip()
+        if tok:
+            try:
+                stimulus_times.append(float(tok))
+            except ValueError:
+                pass
+
+
+def detect_response_events(times, values, stimulus_time,
+                            baseline_window_sec=30, change_threshold_ratio=0.05,
+                            direction="auto"):
+    """
+    friend's detect_response_events를 일반화한 버전.
+    direction: 'decrease' (감소만 반응으로 인정), 'increase' (증가만),
+               'auto' (증가/감소 모두 절대 변화량 기준으로 인정)
+    """
+    times = np.asarray(times)
+    values = np.asarray(values)
+
+    baseline_mask = (times >= stimulus_time - baseline_window_sec) & (times < stimulus_time)
+    if baseline_mask.sum() < 3:
+        baseline_mask = times < stimulus_time
+    baseline = np.mean(values[baseline_mask]) if baseline_mask.sum() > 0 else values[0]
+
+    after_mask = times >= stimulus_time
+    t_after, v_after = times[after_mask], values[after_mask]
+
+    if len(v_after) == 0:
+        return None
+
+    threshold = abs(baseline) * change_threshold_ratio
+
+    if direction == "decrease":
+        crossed = np.where(v_after < baseline - threshold)[0]
+        extreme_idx = int(np.argmin(v_after))
+    elif direction == "increase":
+        crossed = np.where(v_after > baseline + threshold)[0]
+        extreme_idx = int(np.argmax(v_after))
+    else:
+        crossed = np.where(np.abs(v_after - baseline) >= threshold)[0]
+        extreme_idx = int(np.argmax(np.abs(v_after - baseline)))
+
+    onset_time = t_after[crossed[0]] - stimulus_time if len(crossed) > 0 else None
+
+    peak_time = t_after[extreme_idx] - stimulus_time
+    peak_value = v_after[extreme_idx]
+    change_percent = ((peak_value - baseline) / baseline * 100) if baseline != 0 else None
+
+    recovery_threshold = threshold * 0.5
+    post_peak_mask = t_after >= t_after[extreme_idx]
+    recovered = np.where(np.abs(v_after[post_peak_mask] - baseline) <= recovery_threshold)[0]
+    recovery_time = (
+        t_after[post_peak_mask][recovered[0]] - stimulus_time
+        if len(recovered) > 0 else None
     )
 
+    return {
+        "baseline": baseline,
+        "onset_latency_sec": onset_time,
+        "peak_time_sec": peak_time,
+        "change_percent": change_percent,
+        "recovery_time_sec": recovery_time,
+    }
+
 
 # ============================================================
-# 11. 분석 시작
+# 10. 분석 시작
 # ============================================================
 
-st.subheader("3단계 — 영상 분석")
+st.subheader("5단계 — 분석 시작")
 
 analyze_button = st.button(
     "🌱 분석 시작",
     type="primary",
-    disabled=(st.session_state.selected_point is None)
+    disabled=(ROI is None)
 )
 
-if st.session_state.selected_point is None:
-    st.warning("분석을 시작하려면 먼저 2단계에서 추적할 점을 선택하세요.")
+if ROI is None:
+    st.warning("분석을 시작하려면 먼저 2단계에서 ROI를 지정하세요.")
 
 
 if analyze_button:
@@ -493,307 +424,251 @@ if analyze_button:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_video.name, fourcc, fps, (width, height))
 
+    x1, y1, x2, y2 = ROI
+    p1_local = (BASE_POINT[0] - x1, BASE_POINT[1] - y1)
+
     records = []
     frame_index = 0
+    prev_gray_roi = None
 
-    tracked_point = st.session_state.selected_point  # (x, y), 매 프레임 갱신됨
-    gemini_call_count = 0
+    last_tip_local = None
 
     while True:
 
         ok, frame = cap.read()
-
         if not ok:
             break
 
         timestamp = frame_index / fps
 
-        tracking_method = None
+        crop = frame[y1:y2, x1:x2]
 
         # ------------------------------------------------
-        # 첫 프레임: 사용자가 2단계에서 선택한 점을 그대로 사용
+        # 방법 A: 초록색 마스크 + 잎 끝(가장 먼 점) 탐색
         # ------------------------------------------------
 
-        if frame_index == 0:
+        mask = compute_green_mask(crop, HSV_LOWER, HSV_UPPER)
 
-            sx, sy = st.session_state.selected_point
-            tip_x, tip_y = float(sx), float(sy)
-            tracking_ok = True
-            tracking_method = "initial"
+        green_pixels = cv2.countNonZero(mask)
+        total_pixels = mask.shape[0] * mask.shape[1]
+        green_ratio = green_pixels / total_pixels if total_pixels > 0 else np.nan
+
+        tip_local = find_farthest_point_in_mask(mask, p1_local)
+
+        if tip_local is not None:
+            last_tip_local = tip_local
+        elif last_tip_local is not None:
+            tip_local = last_tip_local  # 이번 프레임에 못 찾으면 마지막 위치 유지
 
         # ------------------------------------------------
-        # 프레임 스킵 설정으로 건너뛰는 프레임: 이전 위치 그대로 기록
-        # (거리 변화 계산의 시간축은 유지하되, 이 프레임은 API를 호출하지 않음)
+        # 방법 B: 프레임 차분 기반 움직임량 (ROI 내부만)
         # ------------------------------------------------
 
-        elif frame_index % frame_skip != 0:
+        gray_roi = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray_roi_blur = cv2.GaussianBlur(gray_roi, (5, 5), 0)
 
-            tip_x, tip_y = tracked_point
-            tracking_ok = True
-            tracking_method = "skipped"
-
+        if prev_gray_roi is not None:
+            diff = cv2.absdiff(prev_gray_roi, gray_roi_blur)
+            _, diff_thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+            motion_score = cv2.countNonZero(diff_thresh) / diff_thresh.size
         else:
+            motion_score = 0.0
 
-            # --------------------------------------------
-            # 매 프레임 Gemini로 점 재탐지 →
-            # 이전 프레임 추적점과 가장 가까운 점을 선택
-            # --------------------------------------------
+        prev_gray_roi = gray_roi_blur
 
-            all_points, raw_text = detect_points_with_gemini(
-                frame, hint_xy=tracked_point
-            )
+        # ------------------------------------------------
+        # 거리 계산 (전체 프레임 좌표 기준)
+        # ------------------------------------------------
 
-            gemini_call_count += 1
+        if tip_local is not None:
+            tip_x = tip_local[0] + x1
+            tip_y = tip_local[1] + y1
+            distance_px = math.hypot(tip_x - BASE_POINT[0], tip_y - BASE_POINT[1])
+        else:
+            tip_x, tip_y, distance_px = np.nan, np.nan, np.nan
 
-            if all_points:
+        # ------------------------------------------------
+        # 시각화
+        # ------------------------------------------------
 
-                nearest = min(
-                    all_points,
-                    key=lambda p: math.hypot(
-                        p[0] - tracked_point[0], p[1] - tracked_point[1]
-                    )
-                )
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 1)
+        cv2.circle(frame, BASE_POINT, 8, (0, 0, 255), -1)
+        cv2.putText(frame, "P1", (BASE_POINT[0] + 10, BASE_POINT[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-                tip_x, tip_y = float(nearest[0]), float(nearest[1])
-                tracking_ok = True
-                tracking_method = "gemini"
-
-            else:
-
-                tip_x, tip_y = np.nan, np.nan
-                tracking_ok = False
-                tracking_method = "lost"
-                # tracked_point는 그대로 유지 (다음 프레임에서 같은 위치 기준으로 재시도)
-
-        if tracking_ok:
-            tracked_point = (tip_x, tip_y)
-
-
-        # ----------------------------------------------------
-        # 거리 계산
-        # ----------------------------------------------------
-
-        distance_px = np.nan
-
-        if tracking_ok:
-
-            distance_px = math.hypot(
-                tip_x - BASE_POINT[0],
-                tip_y - BASE_POINT[1]
-            )
-
+        if not math.isnan(tip_x):
             tip_int = (int(round(tip_x)), int(round(tip_y)))
-
-            cv2.circle(frame, BASE_POINT, 8, (0, 0, 255), -1)
-
-            marker_color = (255, 0, 255) if tracking_method == "skipped" else (0, 165, 255)
-
-            cv2.circle(frame, tip_int, 8, marker_color, -1)
+            cv2.circle(frame, tip_int, 8, (0, 165, 255), -1)
             cv2.line(frame, BASE_POINT, tip_int, (255, 255, 0), 2)
+            cv2.putText(frame, "TIP", (tip_int[0] + 10, tip_int[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
-            cv2.putText(
-                frame, "P1", (BASE_POINT[0] + 10, BASE_POINT[1]),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2
-            )
-
-            label = "SKIP" if tracking_method == "skipped" else "TRACK"
-
-            cv2.putText(
-                frame, label, (tip_int[0] + 10, tip_int[1]),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, marker_color, 2
-            )
-
-        cv2.putText(
-            frame, f"Time: {timestamp:.2f}s", (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
-        )
-
-        if not math.isnan(distance_px):
-            cv2.putText(
-                frame, f"Distance: {distance_px:.1f}px", (20, 70),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
-            )
+        cv2.putText(frame, f"Time: {timestamp:.2f}s", (20, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Green: {green_ratio*100:.1f}%", (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
         writer.write(frame)
-
-
-        # ----------------------------------------------------
-        # 데이터 저장
-        # ----------------------------------------------------
 
         records.append({
             "frame": frame_index,
             "time_s": timestamp,
-            "P1_x": BASE_POINT[0],
-            "P1_y": BASE_POINT[1],
-            "tip_x": tip_x if tracking_ok else np.nan,
-            "tip_y": tip_y if tracking_ok else np.nan,
+            "green_ratio": green_ratio,
+            "motion_score": motion_score,
+            "tip_x": tip_x,
+            "tip_y": tip_y,
             "distance_px": distance_px,
-            "tracking_method": tracking_method
         })
 
         frame_index += 1
 
         progress_bar.progress(min(frame_index / frame_count, 1.0))
-        status.text(
-            f"{frame_index} / {frame_count} 프레임 분석 중... "
-            f"(Gemini 호출 {gemini_call_count}회)"
-        )
+        status.text(f"{frame_index} / {frame_count} 프레임 분석 중...")
 
     cap.release()
     writer.release()
 
-    status.text(
-        f"{frame_index}개 프레임 분석 완료 (Gemini 호출 {gemini_call_count}회 발생)"
-    )
+    status.text(f"{frame_index}개 프레임 분석 완료")
 
 
     # ========================================================
-    # 12. 데이터프레임
+    # 11. 데이터프레임 + 스무딩
     # ========================================================
 
     df = pd.DataFrame(records)
 
+    df["distance_px"] = df["distance_px"].interpolate(limit_direction="both")
     df["tip_x"] = df["tip_x"].interpolate(limit_direction="both")
     df["tip_y"] = df["tip_y"].interpolate(limit_direction="both")
-    df["distance_px"] = df["distance_px"].interpolate(limit_direction="both")
 
-    if df["distance_px"].isna().all():
-        st.error(
-            "추적점을 한 번도 확보하지 못했습니다. "
-            "위쪽 디버그 응답을 확인하거나, Gemini 재탐지 옵션을 켜보세요."
-        )
-        st.stop()
+    def smooth(series, max_window=31, polyorder=3):
+        n = len(series)
+        window = min(max_window, n - (1 - n % 2))
+        if window >= 5 and window > polyorder:
+            if window % 2 == 0:
+                window -= 1
+            return savgol_filter(series, window_length=window, polyorder=polyorder)
+        return series.values
 
+    df["green_ratio_smooth"] = smooth(df["green_ratio"], max_window=51, polyorder=3)
+    df["motion_score_smooth"] = smooth(df["motion_score"], max_window=31, polyorder=2)
+    df["distance_smooth"] = smooth(df["distance_px"], max_window=31, polyorder=3)
 
-    # ========================================================
-    # 13. 초기 거리 대비 상대 변화
-    # ========================================================
-
-    initial_distance = float(df["distance_px"].iloc[0])
-    df["relative_distance_px"] = df["distance_px"] - initial_distance
-
-
-    # ========================================================
-    # 14. 거리 변화 속도 (px/s)
-    # ========================================================
+    initial_distance = float(df["distance_smooth"].iloc[0])
+    df["relative_distance_px"] = df["distance_smooth"] - initial_distance
 
     df["dt"] = df["time_s"].diff()
-    df["ddist"] = df["relative_distance_px"].diff()
-    df["distance_velocity_px_s"] = df["ddist"] / df["dt"]
-
-    velocity_outlier_limit = (
-        max(50, float(df["distance_velocity_px_s"].abs().quantile(0.99)) * 5)
-        if df["distance_velocity_px_s"].notna().any() else 1e9
-    )
-
-    df.loc[
-        df["distance_velocity_px_s"].abs() > velocity_outlier_limit,
-        "distance_velocity_px_s"
-    ] = np.nan
-
+    df["distance_velocity_px_s"] = df["relative_distance_px"].diff() / df["dt"]
     df["distance_velocity_px_s"] = df["distance_velocity_px_s"].interpolate(limit_direction="both")
 
 
     # ========================================================
-    # 15. 반응 시작 시간
-    # ========================================================
-
-    response_candidates = df.loc[
-        df["relative_distance_px"].abs() >= response_threshold_px,
-        "time_s"
-    ]
-
-    response_time = float(response_candidates.iloc[0]) if len(response_candidates) > 0 else np.nan
-
-
-    # ========================================================
-    # 16. 주요 결과
-    # ========================================================
-
-    max_distance_change = float(df["relative_distance_px"].abs().max())
-    max_distance_velocity = float(df["distance_velocity_px_s"].abs().max())
-    max_index = int(df["relative_distance_px"].abs().idxmax())
-    max_change_time = float(df.loc[max_index, "time_s"])
-
-
-    # ========================================================
-    # 17. 결과 표시
+    # 12. 결과 표시
     # ========================================================
 
     st.success("분석이 완료되었습니다.")
 
-    st.subheader("4단계 — 분석 결과")
+    st.subheader("6단계 — 분석 결과")
+
+    if stimulus_times:
+
+        results_summary = []
+
+        for stim_t in stimulus_times:
+
+            res_green = detect_response_events(
+                df["time_s"], df["green_ratio_smooth"], stim_t,
+                change_threshold_ratio=change_threshold_pct, direction="decrease"
+            )
+            res_dist = detect_response_events(
+                df["time_s"], df["distance_smooth"], stim_t,
+                change_threshold_ratio=change_threshold_pct, direction="auto"
+            )
+
+            if res_green:
+                results_summary.append({
+                    "stimulus_time_s": stim_t,
+                    "signal": "green_ratio",
+                    **res_green
+                })
+            if res_dist:
+                results_summary.append({
+                    "stimulus_time_s": stim_t,
+                    "signal": "distance_px",
+                    **res_dist
+                })
+
+        if results_summary:
+            st.write("**자극별 반응 이벤트 (초록 면적 / 거리 신호 비교)**")
+            st.dataframe(pd.DataFrame(results_summary), use_container_width=True)
+
+    else:
+        st.info("자극 시점을 입력하지 않아 자동 반응 감지는 건너뛰었습니다. 아래 그래프로 직접 확인하세요.")
+
+
+    max_distance_change = float(df["relative_distance_px"].abs().max())
+    max_distance_velocity = float(df["distance_velocity_px_s"].abs().max())
+    min_green_ratio = float(df["green_ratio_smooth"].min())
+    max_green_ratio = float(df["green_ratio_smooth"].max())
 
     col1, col2, col3 = st.columns(3)
-
     col1.metric("최대 거리 변화", f"{max_distance_change:.1f}px")
     col2.metric("최대 이동 속도", f"{max_distance_velocity:.1f}px/s")
-
-    if math.isnan(response_time):
-        col3.metric("반응 시작", "검출되지 않음")
-    else:
-        col3.metric("반응 시작", f"{response_time:.2f}s")
-
-    st.write(f"최대 변화 시점: **{max_change_time:.2f}초**")
-
-    method_counts = df["tracking_method"].value_counts()
-    st.caption(
-        "추적 방식별 프레임 수: "
-        + ", ".join(f"{k} {v}개" for k, v in method_counts.items())
-    )
+    col3.metric("초록 면적비 범위", f"{min_green_ratio*100:.1f}% ~ {max_green_ratio*100:.1f}%")
 
 
     # ========================================================
-    # 18. 그래프
+    # 13. 그래프 (3개 신호)
     # ========================================================
 
     st.subheader("움직임 그래프")
 
-    fig, ax1 = plt.subplots(figsize=(12, 6))
+    fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
 
-    ax1.plot(df["time_s"], df["relative_distance_px"], label="Relative Distance")
-    ax1.set_xlabel("Time (s)")
-    ax1.set_ylabel("Relative Distance (px)")
-    ax1.grid(True, alpha=0.25)
+    axes[0].plot(df["time_s"], df["green_ratio"], alpha=0.3, color="gray", label="원본")
+    axes[0].plot(df["time_s"], df["green_ratio_smooth"], color="green", linewidth=2, label="스무딩")
+    axes[0].set_ylabel("Green Area Ratio")
+    axes[0].legend()
+    axes[0].grid(alpha=0.25)
 
-    ax2 = ax1.twinx()
-    ax2.plot(df["time_s"], df["distance_velocity_px_s"], alpha=0.65, label="Distance Change Rate")
-    ax2.set_ylabel("Distance Change Rate (px/s)")
+    axes[1].plot(df["time_s"], df["motion_score"], alpha=0.3, color="gray", label="원본")
+    axes[1].plot(df["time_s"], df["motion_score_smooth"], color="blue", linewidth=2, label="스무딩")
+    axes[1].set_ylabel("Motion Score")
+    axes[1].legend()
+    axes[1].grid(alpha=0.25)
 
-    if not math.isnan(response_time):
-        ax1.axvline(response_time, linestyle="--", alpha=0.7)
+    axes[2].plot(df["time_s"], df["relative_distance_px"], color="orange", linewidth=2, label="P1-Tip 상대 거리")
+    axes[2].set_ylabel("Relative Distance (px)")
+    axes[2].set_xlabel("Time (s)")
+    axes[2].legend()
+    axes[2].grid(alpha=0.25)
 
-    fig.suptitle("Mimosa Motion Analysis (Gemini + Optical Flow)")
+    for stim_t in stimulus_times:
+        for ax in axes:
+            ax.axvline(stim_t, color="red", linestyle="--", alpha=0.6)
+
+    fig.suptitle("Mimosa Motion Analysis (ROI 기반, API 불필요)")
     fig.tight_layout()
 
     st.pyplot(fig)
 
 
     # ========================================================
-    # 19. 데이터 테이블
+    # 14. 데이터 테이블 + CSV
     # ========================================================
 
     st.subheader("프레임별 데이터")
     st.dataframe(df, use_container_width=True)
 
-
-    # ========================================================
-    # 20. CSV 다운로드
-    # ========================================================
-
     csv_data = df.to_csv(index=False).encode("utf-8-sig")
-
     st.download_button(
-        "📊 CSV 다운로드",
-        data=csv_data,
-        file_name="mimosa_analysis.csv",
-        mime="text/csv"
+        "📊 CSV 다운로드", data=csv_data,
+        file_name="mimosa_analysis.csv", mime="text/csv"
     )
 
 
     # ========================================================
-    # 21. 분석 영상
+    # 15. 분석 영상
     # ========================================================
 
     st.subheader("추적 결과 영상")
@@ -804,8 +679,6 @@ if analyze_button:
     st.video(output_video_bytes)
 
     st.download_button(
-        "🎥 분석 영상 다운로드",
-        data=output_video_bytes,
-        file_name="mimosa_tracking_result.mp4",
-        mime="video/mp4"
+        "🎥 분석 영상 다운로드", data=output_video_bytes,
+        file_name="mimosa_tracking_result.mp4", mime="video/mp4"
     )
