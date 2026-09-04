@@ -2,7 +2,6 @@ streamlit
 numpy
 pandas
 matplotlib
-google-genai
-Pillow
-streamlit-image-coordinates
 opencv-python
+scipy
+streamlit-image-coordinates
